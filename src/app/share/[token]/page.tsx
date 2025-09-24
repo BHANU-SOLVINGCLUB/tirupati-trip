@@ -15,14 +15,18 @@ export default function SharePage() {
     (async () => {
       try {
         setLoading(true);
-        const { data: f1 } = await supabase
-          .from("media_files")
-          .select("id,name,storage_path,public_share_id")
-          .eq("public_share_id", token);
-        const { data: f2 } = await supabase
-          .from("media_folders")
-          .select("id,name,public_share_id")
-          .eq("public_share_id", token);
+        const { data: items } = await supabase
+          .from("share_items")
+          .select("file_id, folder_id")
+          .eq("token", token);
+        const fileIds = (items || []).filter((i: any) => i.file_id).map((i: any) => i.file_id);
+        const folderIds = (items || []).filter((i: any) => i.folder_id).map((i: any) => i.folder_id);
+        const { data: f1 } = fileIds.length
+          ? await supabase.from("media_files").select("id,name,storage_path").in("id", fileIds)
+          : { data: [] } as any;
+        const { data: f2 } = folderIds.length
+          ? await supabase.from("media_folders").select("id,name").in("id", folderIds)
+          : { data: [] } as any;
         if (!cancel) {
           setFiles((f1 as any) || []);
           setFolders((f2 as any) || []);

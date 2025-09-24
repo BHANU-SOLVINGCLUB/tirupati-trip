@@ -98,6 +98,19 @@ create table if not exists public.checklist_assignments (
   created_at timestamptz default now()
 );
 
+-- Share collections (avoid writing tokens on original rows)
+create table if not exists public.shares (
+  token uuid primary key,
+  created_at timestamptz default now()
+);
+
+create table if not exists public.share_items (
+  id uuid primary key default gen_random_uuid(),
+  token uuid references public.shares(token) on delete cascade,
+  file_id uuid references public.media_files(id) on delete cascade,
+  folder_id uuid references public.media_folders(id) on delete cascade
+);
+
 -- RLS
 alter table public.profiles enable row level security;
 alter table public.board_statuses enable row level security;
@@ -110,6 +123,8 @@ alter table public.media_files enable row level security;
 alter table public.checklists enable row level security;
 alter table public.checklist_items enable row level security;
 alter table public.checklist_assignments enable row level security;
+alter table public.shares enable row level security;
+alter table public.share_items enable row level security;
 
 create policy "Users can manage own profile" on public.profiles
   for all using (id = auth.uid()) with check (id = auth.uid());
@@ -136,5 +151,11 @@ create policy "Readable items of visible checklists" on public.checklist_items f
   using (exists(select 1 from public.checklists c where c.id = checklist_id and (c.is_global or c.user_id = auth.uid())));
 create policy "Own assignment rows" on public.checklist_assignments for all
   using (user_id = auth.uid()) with check (user_id = auth.uid());
+
+-- Shares: readable by anyone (public), write by authenticated
+create policy "Shares readable" on public.shares for select using (true);
+create policy "Shares writable" on public.shares for all to authenticated using (true) with check (true);
+create policy "Share items readable" on public.share_items for select using (true);
+create policy "Share items writable" on public.share_items for all to authenticated using (true) with check (true);
 
 

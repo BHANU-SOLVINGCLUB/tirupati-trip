@@ -26,18 +26,14 @@ export default function MediaPage() {
   const [query, setQuery] = useState("");
   const [dense, setDense] = useState(false);
   const [showAdd, setShowAdd] = useState(false);
+  const [view, setView] = useState<"grid" | "list">("list");
 
   useEffect(() => {
     let isCancelled = false;
     (async () => {
       try {
         setLoading(true);
-        // Ensure bucket exists
-        // Note: If bucket already exists, this will fail silently for anon users; skip errors.
-        try {
-          // @ts-ignore admin-only; best-effort in client is no-op
-          await supabase.storage.createBucket(BUCKET, { public: true });
-        } catch {}
+        // Bucket is managed in Supabase; do not attempt to create from client
 
         const { data: f } = await supabase.from("media_folders").select("id,name,parent_id,public_share_id").order("created_at");
         const { data: fi } = await supabase
@@ -145,6 +141,29 @@ export default function MediaPage() {
     return supabase.storage.from(BUCKET).getPublicUrl(path).data?.publicUrl ?? null;
   }
 
+  function generateToken(): string {
+    try {
+      // Modern browsers
+      // @ts-ignore
+      if (typeof crypto !== "undefined" && crypto.randomUUID) return crypto.randomUUID();
+      // WebCrypto fallback
+      // @ts-ignore
+      if (typeof crypto !== "undefined" && crypto.getRandomValues) {
+        const buf = new Uint8Array(16);
+        // @ts-ignore
+        crypto.getRandomValues(buf);
+        // Set version and variant bits
+        buf[6] = (buf[6] & 0x0f) | 0x40;
+        buf[8] = (buf[8] & 0x3f) | 0x80;
+        const b = Array.from(buf).map((x) => x.toString(16).padStart(2, "0"));
+        return `${b[0]}${b[1]}${b[2]}${b[3]}-${b[4]}${b[5]}-${b[6]}${b[7]}-${b[8]}${b[9]}-${b[10]}${b[11]}${b[12]}${b[13]}${b[14]}${b[15]}`;
+      }
+    } catch {}
+    // Math.random fallback
+    const s = () => Math.floor((1 + Math.random()) * 0x10000).toString(16).substring(1);
+    return `${s()}${s()}-${s()}-${s()}-${s()}-${s()}${s()}${s()}`;
+  }
+
   async function copyToClipboard(text: string) {
     try {
       if (typeof navigator !== "undefined" && navigator.clipboard && navigator.clipboard.writeText) {
@@ -224,6 +243,8 @@ export default function MediaPage() {
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set()); // can contain file or folder ids
   const [showDetails, setShowDetails] = useState(false);
   const [previewId, setPreviewId] = useState<string | null>(null);
+  const [shareUrl, setShareUrl] = useState<string | null>(null);
+  const [showShare, setShowShare] = useState(false);
 
   function onLongPressStart(itemId: string) {
     setSelecting(true);
@@ -285,7 +306,15 @@ export default function MediaPage() {
       toggleSelect(id);
       return;
     }
-    setPreviewId(id);
+    const file = itemsGrid.find((f) => f.id === id);
+    if (!file) return;
+    const kind = fileKind(file.name);
+    const url = getPublicUrl(file.storage_path);
+    if (kind === "image" || kind === "video") {
+      setPreviewId(id);
+    } else if (url) {
+      window.open(url, "_blank");
+    }
   }
 
   function previewCtx() {
@@ -298,30 +327,37 @@ export default function MediaPage() {
 
   async function createShareAndOpen() {
     try {
-      const token = crypto.randomUUID();
+      const token = generateToken();
       const idsFiles = shownFiles.filter((f) => selectedIds.has(f.id)).map((f) => f.id);
       const idsFolders = shownFolders.filter((d) => selectedIds.has(d.id)).map((d) => d.id);
       if (idsFiles.length === 0 && idsFolders.length === 0) {
         toast.error("Select files or folders to share");
         return;
       }
-      if (idsFiles.length) {
-        const { error } = await supabase
-          .from("media_files")
-          .update({ public_share_id: token })
-          .in("id", idsFiles);
-        if (error) throw error;
-      }
-      if (idsFolders.length) {
-        const { error } = await supabase
-          .from("media_folders")
-          .update({ public_share_id: token })
-          .in("id", idsFolders);
-        if (error) throw error;
+      // Create share collection and map items
+      const { error: shareErr } = await supabase.from("shares").insert({ token });
+      if (shareErr) throw shareErr;
+      const shareItems: { token: string; file_id: string | null; folder_id: string | null }[] = [];
+      idsFiles.forEach((id) => shareItems.push({ token, file_id: id, folder_id: null }));
+      idsFolders.forEach((id) => shareItems.push({ token, file_id: null, folder_id: id }));
+      if (shareItems.length) {
+        const { error: itemsErr } = await supabase.from("share_items").insert(shareItems);
+        if (itemsErr) throw itemsErr;
       }
       const url = `${window.location.origin}/share/${token}`;
-      await copyToClipboard(url);
-      window.open(url, "_blank");
+      setShareUrl(url);
+      // Try native share sheet in a best-practice way (may be blocked on http)
+      try {
+        // @ts-ignore
+        if (navigator && navigator.share) {
+          // @ts-ignore
+          await navigator.share({ title: "Shared Media", text: "View shared media", url });
+          toast.success("Shared link");
+          return;
+        }
+      } catch {}
+      // Otherwise show a small action dialog for copy/open options
+      setShowShare(true);
       toast.success("Share link created");
     } catch (e: any) {
       toast.error(e.message ?? "Share failed");
@@ -354,10 +390,13 @@ export default function MediaPage() {
             })()}
           </div>
         </div>
-        <div className="text-xs text-muted-foreground">Storage path prefix: <code className="px-1 py-0.5 rounded bg-muted">{`<user-id>/${pathPrefix}`}</code></div>
+        {/* Storage path prefix hidden per request */}
         <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
           <Input placeholder="Search..." value={query} onChange={(e) => setQuery(e.target.value)} />
-          <Button variant="outline" onClick={() => setDense((d) => !d)}>{dense ? "Comfortable" : "Dense"}</Button>
+          <div className="flex items-center gap-2">
+            <Button variant="outline" onClick={() => setDense((d) => !d)}>{dense ? "Comfortable" : "Dense"}</Button>
+            <Button variant="outline" onClick={() => setView(view === "grid" ? "list" : "grid")}>{view === "grid" ? "List view" : "Grid view"}</Button>
+          </div>
         </div>
         <input ref={fileInputRef} type="file" multiple onChange={uploadFiles} className="hidden" />
       </Card>
@@ -369,26 +408,47 @@ export default function MediaPage() {
         ) : shownFolders.length === 0 ? (
           <p className="text-sm text-muted-foreground">No folders</p>
         ) : (
-          <div className={`grid ${dense ? 'grid-cols-3 sm:grid-cols-6 gap-1' : 'grid-cols-2 sm:grid-cols-4 gap-2'}`}>
-            {shownFolders.map((d) => (
-              <Card key={d.id} className={`p-2 ${selectedIds.has(d.id) ? 'ring-2 ring-foreground' : ''}`}
-                onContextMenu={(e) => { e.preventDefault(); onLongPressStart(d.id); }}
-                onPointerDown={() => {
-                  let timer: any;
-                  const up = () => { clearTimeout(timer); window.removeEventListener('pointerup', up as any); };
-                  timer = setTimeout(() => onLongPressStart(d.id), 400);
-                  window.addEventListener('pointerup', up as any, { once: true });
-                }}
-              >
-                <button className="w-full text-left" onClick={() => (selecting ? toggleSelect(d.id) : setCwd(d.id))}>
-                  <div className="aspect-square rounded bg-muted flex items-center justify-center">
-                    <FolderIcon className="h-8 w-8" />
-                  </div>
-                  <div className="text-[11px] text-muted-foreground truncate px-1 mt-1">{d.name}</div>
-                </button>
-              </Card>
-            ))}
-          </div>
+          view === 'grid' ? (
+            <div className={`grid ${dense ? 'grid-cols-3 sm:grid-cols-6 gap-1' : 'grid-cols-2 sm:grid-cols-4 gap-2'}`}>
+              {shownFolders.map((d) => (
+                <Card key={d.id} className={`p-2 ${selectedIds.has(d.id) ? 'ring-2 ring-foreground' : ''}`}
+                  onContextMenu={(e) => { e.preventDefault(); onLongPressStart(d.id); }}
+                  onPointerDown={() => {
+                    let timer: any;
+                    const up = () => { clearTimeout(timer); window.removeEventListener('pointerup', up as any); };
+                    timer = setTimeout(() => onLongPressStart(d.id), 400);
+                    window.addEventListener('pointerup', up as any, { once: true });
+                  }}
+                >
+                  <button className="w-full text-left" onClick={() => (selecting ? toggleSelect(d.id) : setCwd(d.id))}>
+                    <div className="aspect-square rounded bg-muted flex items-center justify-center">
+                      <FolderIcon className="h-8 w-8" />
+                    </div>
+                    <div className="text-[11px] text-muted-foreground truncate px-1 mt-1">{d.name}</div>
+                  </button>
+                </Card>
+              ))}
+            </div>
+          ) : (
+            <div className="divide-y rounded border">
+              {shownFolders.map((d) => (
+                <div key={d.id} className={`flex items-center justify-between p-2 ${selectedIds.has(d.id) ? 'bg-muted' : ''}`}
+                  onContextMenu={(e) => { e.preventDefault(); onLongPressStart(d.id); }}
+                  onPointerDown={() => {
+                    let timer: any;
+                    const up = () => { clearTimeout(timer); window.removeEventListener('pointerup', up as any); };
+                    timer = setTimeout(() => onLongPressStart(d.id), 400);
+                    window.addEventListener('pointerup', up as any, { once: true });
+                  }}
+                >
+                  <button className="flex items-center gap-2 flex-1 text-left" onClick={() => (selecting ? toggleSelect(d.id) : setCwd(d.id))}>
+                    <FolderIcon className="h-5 w-5" />
+                    <span className="truncate">{d.name}</span>
+                  </button>
+                </div>
+              ))}
+            </div>
+          )
         )}
       </div>
 
@@ -422,13 +482,30 @@ export default function MediaPage() {
         </DialogContent>
       </Dialog>
 
+      {/* Share actions dialog */}
+      <Dialog open={showShare} onOpenChange={(o: boolean) => setShowShare(o)}>
+        <DialogHeader>
+          <DialogTitle>Share</DialogTitle>
+        </DialogHeader>
+        <DialogContent>
+          <div className="space-y-2">
+            <div className="break-all text-sm">{shareUrl}</div>
+            <div className="flex items-center gap-2">
+              <Button onClick={async () => { if (shareUrl) { await copyToClipboard(shareUrl); toast.success("Copied"); } }}>Copy</Button>
+              <Button variant="outline" onClick={() => { if (shareUrl) { try { window.open(shareUrl, "_blank"); } catch { location.assign(shareUrl); } } }}>Open</Button>
+            </div>
+          </div>
+        </DialogContent>
+      </Dialog>
+
       <div className="space-y-2">
         <div className="text-sm font-medium">Files</div>
         {itemsGrid.length === 0 ? (
           <p className="text-sm text-muted-foreground">No files</p>
         ) : (
-          <div className={`grid ${dense ? 'grid-cols-3 sm:grid-cols-6 gap-1' : 'grid-cols-2 sm:grid-cols-4 gap-2'}`}>
-            {itemsGrid.map((f) => {
+          view === 'grid' ? (
+            <div className={`grid ${dense ? 'grid-cols-3 sm:grid-cols-6 gap-1' : 'grid-cols-2 sm:grid-cols-4 gap-2'}`}>
+              {itemsGrid.map((f) => {
               const kind = fileKind(f.name);
               const url = getPublicUrl(f.storage_path);
               return (
@@ -460,7 +537,34 @@ export default function MediaPage() {
                 </Card>
               );
             })}
-          </div>
+            </div>
+          ) : (
+            <div className="divide-y rounded border">
+              {itemsGrid.map((f) => {
+                const kind = fileKind(f.name);
+                const url = getPublicUrl(f.storage_path);
+                return (
+                  <div key={f.id} className={`flex items-center justify-between p-2 ${selectedIds.has(f.id) ? 'bg-muted' : ''}`}
+                    onContextMenu={(e) => { e.preventDefault(); onLongPressStart(f.id); }}
+                    onPointerDown={() => {
+                      let timer: any;
+                      const up = () => { clearTimeout(timer); window.removeEventListener('pointerup', up as any); };
+                      timer = setTimeout(() => onLongPressStart(f.id), 400);
+                      window.addEventListener('pointerup', up as any, { once: true });
+                    }}
+                  >
+                    <button className="flex items-center gap-2 flex-1 text-left" onClick={() => (selecting ? toggleSelect(f.id) : openPreview(f.id))}>
+                      {kind === 'image' && url && <span className="h-5 w-5 rounded bg-muted inline-block" />}
+                      {kind === 'video' && url && <span className="h-5 w-5 rounded bg-muted inline-block" />}
+                      {kind === 'pdf' && <span className="text-xs">PDF</span>}
+                      {kind === 'other' && <FileIcon className="h-5 w-5" />}
+                      <span className="truncate">{f.name}</span>
+                    </button>
+                  </div>
+                );
+              })}
+            </div>
+          )
         )}
         {selecting && (
           <div className="sticky bottom-16 z-40 bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-background/60 border rounded-md p-2 flex items-center justify-between">
