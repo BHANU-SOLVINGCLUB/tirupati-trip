@@ -62,11 +62,8 @@ export default function MediaPage() {
   const shownFolders = folders.filter((d) => (cwd ? d.parent_id === cwd : d.parent_id === null));
   // Files within current folder
   const shownFiles = files.filter((f) => f.folder_id === cwd);
-  // Media files within current folder (for preview grid)
-  const mediaGrid = shownFiles.filter((f) => {
-    const kind = fileKind(f.name);
-    const isMedia = kind === "image" || kind === "video";
-    if (!isMedia) return false;
+  // Files within current folder to show in grid (images, videos, pdfs, others)
+  const itemsGrid = shownFiles.filter((f) => {
     if (!query.trim()) return true;
     return f.name.toLowerCase().includes(query.toLowerCase());
   }).sort((a,b) => b.id.localeCompare(a.id));
@@ -201,6 +198,26 @@ export default function MediaPage() {
       toast.error(e.message ?? "Delete failed");
     }
   }
+  async function renameFile(row: FileRow) {
+    try {
+      const newName = prompt("Rename file", row.name)?.trim();
+      if (!newName || newName === row.name) return;
+      const parts = row.storage_path.split("/");
+      parts[parts.length - 1] = `${Date.now()}_${newName}`;
+      const newPath = parts.join("/");
+      const { error: mvErr } = await supabase.storage.from(BUCKET).move(row.storage_path, newPath);
+      if (mvErr) throw mvErr;
+      const { error: dbErr } = await supabase
+        .from("media_files")
+        .update({ name: newName, storage_path: newPath })
+        .eq("id", row.id);
+      if (dbErr) throw dbErr;
+      setFiles((prev) => prev.map((f) => (f.id === row.id ? { ...f, name: newName, storage_path: newPath } : f)));
+      toast.success("Renamed");
+    } catch (e: any) {
+      toast.error(e.message ?? "Rename failed");
+    }
+  }
 
   // Multi-select with long press
   const [selecting, setSelecting] = useState(false);
@@ -272,10 +289,10 @@ export default function MediaPage() {
   }
 
   function previewCtx() {
-    const idx = mediaGrid.findIndex((f) => f.id === previewId);
-    const file = idx >= 0 ? mediaGrid[idx] : null;
-    const nextId = idx >= 0 && idx < mediaGrid.length - 1 ? mediaGrid[idx + 1].id : null;
-    const prevId = idx > 0 ? mediaGrid[idx - 1].id : null;
+    const idx = itemsGrid.findIndex((f) => f.id === previewId);
+    const file = idx >= 0 ? itemsGrid[idx] : null;
+    const nextId = idx >= 0 && idx < itemsGrid.length - 1 ? itemsGrid[idx + 1].id : null;
+    const prevId = idx > 0 ? itemsGrid[idx - 1].id : null;
     return { file, nextId, prevId };
   }
 
@@ -407,11 +424,11 @@ export default function MediaPage() {
 
       <div className="space-y-2">
         <div className="text-sm font-medium">Files</div>
-        {mediaGrid.length === 0 ? (
+        {itemsGrid.length === 0 ? (
           <p className="text-sm text-muted-foreground">No files</p>
         ) : (
           <div className={`grid ${dense ? 'grid-cols-3 sm:grid-cols-6 gap-1' : 'grid-cols-2 sm:grid-cols-4 gap-2'}`}>
-            {mediaGrid.map((f) => {
+            {itemsGrid.map((f) => {
               const kind = fileKind(f.name);
               const url = getPublicUrl(f.storage_path);
               return (
@@ -432,6 +449,9 @@ export default function MediaPage() {
                     {kind === "video" && url && (
                       <video src={url} className="h-full w-full object-cover" controls={false} muted playsInline />
                     )}
+                    {kind === "pdf" && url && (
+                      <a href={url} target="_blank" rel="noreferrer" className="text-xs underline">PDF</a>
+                    )}
                     {kind === "other" && (
                       <FileIcon className="h-8 w-8" />
                     )}
@@ -448,6 +468,13 @@ export default function MediaPage() {
             <div className="flex items-center gap-2">
               <Button variant="outline" onClick={createShareAndOpen}>Share</Button>
               <Button variant="outline" onClick={deleteSelected}>Delete</Button>
+              {(() => {
+                if (selectedIds.size !== 1) return null;
+                const id = Array.from(selectedIds)[0];
+                const file = files.find((f) => f.id === id);
+                if (!file) return null;
+                return <Button variant="outline" onClick={() => renameFile(file)}>Rename</Button>;
+              })()}
               <Button variant="outline" onClick={() => setShowDetails(true)}>Details</Button>
               <Button variant="outline" onClick={clearSelection}>Cancel</Button>
             </div>
