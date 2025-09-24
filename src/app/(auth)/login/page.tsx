@@ -27,9 +27,9 @@ function LoginInner() {
       });
       if (error) throw error;
       toast.success("Logged in");
-      // Call server route to sync cookies before navigating
+      // Sync cookies on server and then navigate client-side (avoid SSR assumptions)
       await fetch("/api/auth/refresh", { cache: "no-store" });
-      window.location.href = next;
+      location.assign(next);
     } catch (e: any) {
       toast.error(e.message ?? "Login failed");
     } finally {

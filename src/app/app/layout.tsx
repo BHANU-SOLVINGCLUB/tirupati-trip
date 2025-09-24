@@ -15,11 +15,7 @@ export default function AppSectionLayout({ children }: { children: React.ReactNo
     (async () => {
       const { data } = await supabaseBrowser.auth.getSession();
       if (!active) return;
-      if (!data.session) {
-        router.replace("/login?next=/app");
-      } else {
-        setReady(true);
-      }
+      setReady(true);
     })();
     return () => {
       active = false;

@@ -29,11 +29,8 @@ export async function middleware(req: NextRequest) {
   const isApp = url.pathname.startsWith("/app");
   const isAuth = url.pathname.startsWith("/login") || url.pathname.startsWith("/signup") || url.pathname.startsWith("/forgot-password") || url.pathname.startsWith("/reset-password");
 
-  if (isApp && !session) {
-    const redirectUrl = new URL("/login", req.url);
-    redirectUrl.searchParams.set("next", url.pathname + url.search);
-    return NextResponse.redirect(redirectUrl);
-  }
+  // Do not hard-block app routes in middleware to avoid redirect loops when
+  // server cookies lag behind client session. Client-side layouts will guard.
 
   if (isAuth && session) {
     const nextParam = url.searchParams.get("next");
